@@ -13,4 +13,3 @@ export function healthCheck(req, res) {
     uptime: process.uptime(),
   });
 }
-

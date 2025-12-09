@@ -114,4 +114,3 @@ export function validateConfig(config) {
 
   return true;
 }
-

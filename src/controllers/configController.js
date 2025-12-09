@@ -56,4 +56,3 @@ export async function saveConfig(req, res, next) {
     next(error);
   }
 }
-

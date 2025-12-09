@@ -5,11 +5,7 @@
 
 import fs from "fs/promises";
 import path from "path";
-import { fileURLToPath } from "url";
 import { pathConfig, logConfig } from "../config/index.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const LOG_LEVELS = {
   error: 0,
@@ -97,4 +93,3 @@ class Logger {
 
 export const logger = new Logger();
 export default logger;
-

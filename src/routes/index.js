@@ -16,4 +16,3 @@ router.get("/health", healthCheck);
 router.use("/api/config", configRoutes);
 
 export default router;
-

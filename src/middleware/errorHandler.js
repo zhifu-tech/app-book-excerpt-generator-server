@@ -7,7 +7,7 @@ import { logger } from "../utils/logger.js";
 /**
  * 错误处理中间件
  */
-export function errorHandler(err, req, res, next) {
+export function errorHandler(err, req, res, _next) {
   logger.error("服务器错误", {
     error: err.message,
     stack: err.stack,
@@ -36,4 +36,3 @@ export function notFoundHandler(req, res) {
     path: req.path,
   });
 }
-

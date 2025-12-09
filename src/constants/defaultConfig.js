@@ -42,4 +42,3 @@ export const defaultConfig = {
     { id: "color-purple", value: "#6a1b9a", name: "紫色" },
   ],
 };
-
