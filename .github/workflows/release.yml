@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*" # 匹配所有版本标签，如 v0.2.0, v1.0.0 等
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整历史记录，用于生成 changelog
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Extract version from tag
+        id: tag_version
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          VERSION=${TAG_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Tag: $TAG_NAME, Version: $VERSION"
+
+      - name: Generate release notes from CHANGELOG
+        id: changelog
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG_NAME#v}
+
+          # 从 CHANGELOG.md 提取对应版本的更新内容
+          if [ -f "docs/CHANGELOG.md" ]; then
+            # 使用 sed 提取版本内容（从版本标题到下一个版本标题之间的内容）
+            CHANGELOG_CONTENT=$(sed -n "/^## \[${VERSION}\]/,/^## \[/p" docs/CHANGELOG.md | sed '$d' | sed '1d')
+            
+            if [ -z "$CHANGELOG_CONTENT" ]; then
+              # 如果没找到，尝试从 git tag 消息获取
+              CHANGELOG_CONTENT=$(git tag -l --format='%(contents)' "$TAG_NAME" 2>/dev/null || echo "")
+            fi
+            
+            # 如果还是为空，使用默认消息
+            if [ -z "$CHANGELOG_CONTENT" ]; then
+              CHANGELOG_CONTENT="查看 [CHANGELOG.md](docs/CHANGELOG.md) 了解详细更新内容。"
+            fi
+            
+            # 转义多行文本为 GitHub Actions 格式
+            {
+              echo "changelog<<EOF"
+              echo "$CHANGELOG_CONTENT"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          else
+            # 如果没有 CHANGELOG，使用 tag 消息
+            TAG_MESSAGE=$(git tag -l --format='%(contents)' "$TAG_NAME" 2>/dev/null || echo "版本 $VERSION 发布")
+            {
+              echo "changelog<<EOF"
+              echo "$TAG_MESSAGE"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.tag_version.outputs.tag_name }}
+          body: |
+            ## 版本 ${{ steps.tag_version.outputs.version }}
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ---
+
+            **📦 安装方式**:
+            ```bash
+            npm install
+            ```
+
+            **🚀 快速开始**:
+            ```bash
+            cp example.env .env
+            npm start
+            ```
+
+            **📚 文档**:
+            - [README.md](README.md) - 使用说明
+            - [部署指南](docs/DEPLOY.md) - 服务器部署
+            - [Docker 指南](docs/DOCKER.md) - 容器化部署
+            - [完整更新日志](docs/CHANGELOG.md) - 所有版本更新
+          draft: false
+          prerelease: ${{ contains(steps.tag_version.outputs.version, '-') || contains(steps.tag_version.outputs.version, 'alpha') || contains(steps.tag_version.outputs.version, 'beta') || contains(steps.tag_version.outputs.version, 'rc') }}
+          files: |
+            package.json
+            package-lock.json
+          token: ${{ secrets.GITHUB_TOKEN }}

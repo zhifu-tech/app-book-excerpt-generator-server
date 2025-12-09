@@ -28,4 +28,7 @@ Thumbs.db
 *.tmp
 .cache/
 
+# GitHub Actions
+# .github/workflows/ 应该被提交，不需要忽略
+
 

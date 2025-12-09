@@ -187,10 +187,23 @@ pm2 save
 docker-compose up -d
 ```
 
+### GitHub 自动发布
+
+项目配置了基于 Git tag 的自动发布流程：
+
+```bash
+# 创建标签并推送
+git tag -a v0.2.0 -m "版本 0.2.0"
+git push origin v0.2.0
+```
+
+推送标签后，GitHub Actions 会自动创建 Release。
+
 详细部署说明请查看：
 
 - [部署指南](./docs/DEPLOY.md) - 服务器部署详细说明
 - [Docker 指南](./docs/DOCKER.md) - Docker 容器化部署
+- [发布流程](./docs/RELEASE.md) - GitHub 自动发布流程
 
 ## ⚙️ 配置
 
