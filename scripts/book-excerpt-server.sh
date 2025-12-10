@@ -811,13 +811,28 @@ cmd_update_nginx() {
     exit 1
   fi
 
-  # 确定证书文件路径（复用 book-excerpt.zhifu.tech_nginx 目录）
-  CERT_DIR="$SCRIPT_DIR/book-excerpt.zhifu.tech_nginx"
-  CERT_BUNDLE_CRT="$CERT_DIR/book-excerpt.zhifu.tech_bundle.crt"
-  CERT_BUNDLE_PEM="$CERT_DIR/book-excerpt.zhifu.tech_bundle.pem"
-  CERT_CRT="$CERT_DIR/book-excerpt.zhifu.tech.crt"
-  CERT_PEM="$CERT_DIR/book-excerpt.zhifu.tech.pem"
-  CERT_KEY="$CERT_DIR/book-excerpt.zhifu.tech.key"
+  # 确定证书文件路径（使用 api.book-excerpt.zhifu.tech_nginx 目录）
+  CERT_DIR="$SCRIPT_DIR/api.book-excerpt.zhifu.tech_nginx"
+  # 优先使用 api 子域名的证书，如果没有则回退到主域名证书
+  CERT_BUNDLE_CRT="$CERT_DIR/api.book-excerpt.zhifu.tech_bundle.crt"
+  CERT_BUNDLE_PEM="$CERT_DIR/api.book-excerpt.zhifu.tech_bundle.pem"
+  CERT_CRT="$CERT_DIR/api.book-excerpt.zhifu.tech.crt"
+  CERT_PEM="$CERT_DIR/api.book-excerpt.zhifu.tech.pem"
+  CERT_KEY="$CERT_DIR/api.book-excerpt.zhifu.tech.key"
+  
+  # 如果 API 子域名证书不存在，回退到主域名证书
+  if [ ! -f "$CERT_KEY" ]; then
+    FALLBACK_CERT_DIR="$SCRIPT_DIR/book-excerpt.zhifu.tech_nginx"
+    if [ -f "$FALLBACK_CERT_DIR/book-excerpt.zhifu.tech.key" ]; then
+      CERT_DIR="$FALLBACK_CERT_DIR"
+      CERT_BUNDLE_CRT="$CERT_DIR/book-excerpt.zhifu.tech_bundle.crt"
+      CERT_BUNDLE_PEM="$CERT_DIR/book-excerpt.zhifu.tech_bundle.pem"
+      CERT_CRT="$CERT_DIR/book-excerpt.zhifu.tech.crt"
+      CERT_PEM="$CERT_DIR/book-excerpt.zhifu.tech.pem"
+      CERT_KEY="$CERT_DIR/book-excerpt.zhifu.tech.key"
+      print_info "使用主域名证书目录: ${CERT_DIR}"
+    fi
+  fi
 
   # 检查证书文件是否存在（支持多种命名格式）
   CERT_FILES_EXIST=false
@@ -915,8 +930,14 @@ mkdir -p /etc/nginx/ssl
 echo -e "\033[0;32m✓ SSL 证书目录已创建: /etc/nginx/ssl\033[0m"
 ENDSSH
     
+    # 确定证书名称（根据实际使用的证书目录）
+    if [[ "$CERT_DIR" == *"api.book-excerpt.zhifu.tech_nginx"* ]]; then
+      CERT_NAME="api.book-excerpt.zhifu.tech"
+    else
+      CERT_NAME="book-excerpt.zhifu.tech"
+    fi
+    
     # 上传证书文件（根据实际找到的文件类型上传）
-    CERT_NAME="book-excerpt.zhifu.tech"
     if [ -f "$CERT_BUNDLE_CRT" ]; then
       scp $SSH_OPTIONS -P ${SERVER_PORT} "$CERT_BUNDLE_CRT" ${SSH_TARGET}:/etc/nginx/ssl/${CERT_NAME}_bundle.crt
       print_success "证书文件已上传 (bundle.crt)"
@@ -1074,8 +1095,14 @@ ENDSSH
   if [ "$CERT_FILES_EXIST" = true ]; then
     echo ""
     echo -e "${YELLOW}SSL 证书位置:${NC}"
-    echo -e "  ${GREEN}/etc/nginx/ssl/book-excerpt.zhifu.tech_bundle.*${NC}"
-    echo -e "  ${GREEN}/etc/nginx/ssl/book-excerpt.zhifu.tech.key${NC}"
+    # 根据实际使用的证书目录确定证书名称
+    if [[ "$CERT_DIR" == *"api.book-excerpt.zhifu.tech_nginx"* ]]; then
+      echo -e "  ${GREEN}/etc/nginx/ssl/api.book-excerpt.zhifu.tech_bundle.*${NC}"
+      echo -e "  ${GREEN}/etc/nginx/ssl/api.book-excerpt.zhifu.tech.key${NC}"
+    else
+      echo -e "  ${GREEN}/etc/nginx/ssl/book-excerpt.zhifu.tech_bundle.*${NC}"
+      echo -e "  ${GREEN}/etc/nginx/ssl/book-excerpt.zhifu.tech.key${NC}"
+    fi
   fi
   echo ""
   echo -e "${YELLOW}API 端点:${NC}"
