@@ -203,6 +203,7 @@ git push origin v0.2.0
 
 - [部署指南](./docs/DEPLOY.md) - 服务器部署详细说明
 - [Docker 指南](./docs/DOCKER.md) - Docker 容器化部署
+- [DNS 配置指南](./docs/DNS_CONFIG.md) - DNS 域名解析配置
 - [发布流程](./docs/RELEASE.md) - GitHub 自动发布流程
 
 ## ⚙️ 配置
