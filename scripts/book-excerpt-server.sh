@@ -7,7 +7,8 @@
 # 使用方法: ./book-excerpt-server.sh [command] [options]
 # ============================================
 
-set -e
+# 严格模式：遇到错误立即退出，使用未定义变量报错，管道中任一命令失败则整个管道失败
+set -euo pipefail
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,73 +18,30 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # 配置变量
 # ============================================
 
-# 服务器配置
-SERVER_HOST="8.138.183.116"
-SERVER_USER="root"
-SERVER_PORT="22"
+# 服务器配置（导出供共用脚本使用）
+export SERVER_HOST="${SERVER_HOST:-8.138.183.116}"
+export SERVER_USER="${SERVER_USER:-root}"
+export SERVER_PORT="${SERVER_PORT:-22}"
+
+# 应用目录配置
 APP_DIR="/opt/book-excerpt-generator-server"
 APP_PORT="3001"
-
-# SSH 配置
-SSH_KEY_NAME="id_rsa_book_excerpt"
-SSH_KEY_PATH="$HOME/.ssh/$SSH_KEY_NAME"
-SSH_ALIAS="book-excerpt-server"
-
-# 初始化 SSH 连接参数
-init_ssh_connection() {
-  if [ -f "$SSH_KEY_PATH" ]; then
-    SSH_OPTIONS="-i $SSH_KEY_PATH"
-    SSH_TARGET="$SERVER_USER@$SERVER_HOST"
-  elif ssh -o ConnectTimeout=1 -o BatchMode=yes "$SSH_ALIAS" "echo" &>/dev/null 2>&1; then
-    SSH_OPTIONS=""
-    SSH_TARGET="$SSH_ALIAS"
-  else
-    SSH_OPTIONS=""
-    SSH_TARGET="$SERVER_USER@$SERVER_HOST"
-  fi
-}
-
-# 自动初始化 SSH 连接
-init_ssh_connection
-
-# 颜色输出定义
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NGINX_CONF_PATH="/etc/nginx/conf.d/book-excerpt-generator-server.conf"
+SSL_CERT_DIR="/etc/nginx/ssl"
 
 # ============================================
 # 工具函数
 # ============================================
 
-# 打印成功消息
-print_success() {
-  echo -e "${GREEN}✓ $1${NC}"
-}
+# 加载共用脚本库（必须在 trap 之前加载，以便使用 safe_exit）
+APP_COMMON_DIR="$(cd "$PROJECT_ROOT/../app-common" && pwd)"
+[ -f "$APP_COMMON_DIR/scripts/common-utils.sh" ] && source "$APP_COMMON_DIR/scripts/common-utils.sh"
+[ -f "$APP_COMMON_DIR/scripts/ssh-utils.sh" ] && source "$APP_COMMON_DIR/scripts/ssh-utils.sh"
+[ -f "$APP_COMMON_DIR/scripts/nginx-utils.sh" ] && source "$APP_COMMON_DIR/scripts/nginx-utils.sh"
+[ -f "$APP_COMMON_DIR/scripts/nginx-update.sh" ] && source "$APP_COMMON_DIR/scripts/nginx-update.sh"
 
-# 打印警告消息
-print_warning() {
-  echo -e "${YELLOW}⚠ $1${NC}"
-}
-
-# 打印错误消息
-print_error() {
-  echo -e "${RED}✗ $1${NC}"
-}
-
-# 打印信息消息
-print_info() {
-  echo -e "${BLUE}ℹ $1${NC}"
-}
-
-# 打印标题
-print_title() {
-  echo -e "${CYAN}==========================================${NC}"
-  echo -e "${CYAN}$1${NC}"
-  echo -e "${CYAN}==========================================${NC}"
-}
+# 设置清理 trap（脚本退出时清理临时文件，必须在加载 common-utils.sh 之后）
+trap 'safe_exit $?' EXIT INT TERM
 
 # ============================================
 # 欢迎界面
@@ -91,7 +49,13 @@ print_title() {
 show_welcome() {
   echo ""
   echo -e "${CYAN}"
-  cat << "EOF"
+  # 从 welcome.txt 读取欢迎画面
+  local welcome_file="$APP_COMMON_DIR/welcome.txt"
+  if [ -f "$welcome_file" ]; then
+    cat "$welcome_file"
+  else
+    # 如果文件不存在，使用默认的 ASCII 艺术字
+    cat << "EOF"
  ____                     __          ____                                            __        ____                                            
 /\  _`\                  /\ \        /\  _`\                                         /\ \__    /\  _`\                                          
 \ \ \L\ \    ___     ___ \ \ \/'\    \ \ \L\_\   __  _    ___      __   _ __   _____ \ \ ,_\   \ \,\L\_\      __   _ __   __  __     __   _ __  
@@ -102,12 +66,13 @@ show_welcome() {
                                                                                  \ \_\                                                          
                                                                                   \/_/
 EOF
+  fi
   echo -e "${NC}"
   echo -e "${CYAN}              Book Excerpt Generator Server@Zhifu's Tech${NC}"
   echo ""
   local cmd="${1:-help}"
   echo -e "${YELLOW}版本: 0.2.0${NC}"
-  echo -e "${YELLOW}服务器: ${SERVER_HOST}${NC}"
+  echo -e "${YELLOW}服务器: ${SERVER_HOST:-未配置}${NC}"
   echo -e "${YELLOW}命令: ${cmd}${NC}"
   echo ""
 }
@@ -123,16 +88,26 @@ show_help() {
   echo ""
   echo -e "${YELLOW}可用命令:${NC}"
   echo ""
+  echo -e "  ${GREEN}SSH 配置:${NC}"
+  echo -e "  ${GREEN}update-ssh-key${NC}     更新 SSH 公钥到服务器"
+  echo ""
+  echo -e "  ${GREEN}部署:${NC}"
   echo -e "  ${GREEN}deploy${NC}             部署服务到服务器"
   echo -e "  ${GREEN}restart${NC}             重启服务"
+  echo ""
+  echo -e "  ${GREEN}监控:${NC}"
   echo -e "  ${GREEN}status${NC}              检查服务状态"
   echo -e "  ${GREEN}check${NC}              快速检查服务"
-  echo -e "  ${GREEN}fix-502${NC}            修复 502 错误"
   echo -e "  ${GREEN}logs${NC}               查看服务日志"
+  echo ""
+  echo -e "  ${GREEN}Nginx 配置:${NC}"
   echo -e "  ${GREEN}update-nginx${NC}        更新 Nginx 配置文件"
+  echo ""
+  echo -e "  ${GREEN}工具:${NC}"
+  echo -e "  ${GREEN}fix-502${NC}            修复 502 错误"
   echo -e "  ${GREEN}install-pm2${NC}        安装 PM2 进程管理器"
-  echo -e "  ${GREEN}setup-ssh${NC}          设置 SSH 密钥认证"
   echo -e "  ${GREEN}firewall${NC}           检查防火墙配置"
+  echo ""
   echo -e "  ${GREEN}help${NC}               显示此帮助信息"
   echo ""
   echo -e "${YELLOW}示例:${NC}"
@@ -150,21 +125,15 @@ cmd_deploy() {
   print_title "部署服务到服务器 ${SERVER_HOST}"
   
   # 切换到项目根目录
-  cd "$PROJECT_ROOT"
+  cd "$PROJECT_ROOT" || return 1
   
   # 检查本地文件
-  if [ ! -f "package.json" ]; then
-    print_error "未找到 package.json，请确保在项目根目录执行"
-    exit 1
-  fi
-
-  if [ ! -d "src" ]; then
-    print_error "未找到 src/ 目录，请确保在项目根目录执行"
-    exit 1
-  fi
+  check_file_exists "package.json" "未找到 package.json，请确保在项目根目录执行" || return 1
+  check_dir_exists "src" "未找到 src/ 目录，请确保在项目根目录执行" || return 1
 
   # 创建临时部署目录
   TEMP_DIR=$(mktemp -d)
+  register_cleanup "$TEMP_DIR"
   print_info "创建临时目录: ${TEMP_DIR}"
 
   # 复制必要文件
@@ -186,15 +155,14 @@ cmd_deploy() {
 
   # 上传文件到服务器
   print_info "上传文件到服务器..."
-  ssh $SSH_OPTIONS -p ${SERVER_PORT} ${SSH_TARGET} "mkdir -p ${APP_DIR}"
+  ssh_exec "mkdir -p ${APP_DIR}"
   scp $SSH_OPTIONS -r -P ${SERVER_PORT} "$TEMP_DIR"/* ${SSH_TARGET}:${APP_DIR}/
 
-  # 清理临时目录
-  rm -rf "$TEMP_DIR"
+  # 临时目录会在脚本退出时自动清理（通过 trap）
 
   # 在服务器上执行部署操作
   print_info "在服务器上安装依赖并启动服务..."
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
+  ssh_exec << 'ENDSSH'
 set -e
 cd /opt/book-excerpt-generator-server
 
@@ -361,7 +329,7 @@ ENDSSH
 cmd_restart() {
   print_title "重启服务"
   
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
+  ssh_exec << 'ENDSSH'
 set -e
 cd /opt/book-excerpt-generator-server
 
@@ -433,7 +401,7 @@ ENDSSH
 cmd_status() {
   print_title "检查服务状态"
   
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
+  ssh_exec << 'ENDSSH'
 set -e
 cd /opt/book-excerpt-generator-server 2>/dev/null || { echo "✗ 部署目录不存在"; exit 1; }
 
@@ -568,7 +536,7 @@ ENDSSH
 cmd_check() {
   print_title "快速检查服务"
   
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
+  ssh_exec << 'ENDSSH'
 set -e
 
 echo "快速检查服务状态..."
@@ -608,7 +576,7 @@ ENDSSH
 cmd_fix_502() {
   print_title "修复 502 错误"
   
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
+  ssh_exec << 'ENDSSH'
 set -e
 cd /opt/book-excerpt-generator-server 2>/dev/null || { echo "✗ 部署目录不存在"; exit 1; }
 
@@ -695,7 +663,7 @@ cmd_logs() {
   
   print_title "查看服务日志（最近 ${lines} 行）"
   
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << ENDSSH
+  ssh_exec << ENDSSH
 set -e
 cd /opt/book-excerpt-generator-server 2>/dev/null || { echo "✗ 部署目录不存在"; exit 1; }
 
@@ -763,35 +731,20 @@ ENDSSH
 }
 
 # ============================================
-# 设置 SSH 密钥
+# 更新 SSH 公钥到服务器
 # ============================================
-cmd_setup_ssh() {
-  print_title "设置 SSH 密钥认证"
-  
-  echo -e "${YELLOW}这将帮助您设置 SSH 密钥认证，避免每次输入密码${NC}"
+cmd_update_ssh_key() {
+  print_info "更新 SSH 公钥到服务器 ${SERVER_HOST}..."
   echo ""
   
-  # 检查是否已有密钥
-  if [ -f "$SSH_KEY_PATH" ]; then
-    print_warning "SSH 密钥已存在: ${SSH_KEY_PATH}"
-    read -p "是否要重新生成？(y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      echo "跳过密钥生成"
-      exit 0
-    fi
+  if ! update_ssh_key_to_server; then
+    print_error "SSH 公钥更新失败"
+    return 1
   fi
   
-  # 生成 SSH 密钥
-  print_info "生成 SSH 密钥..."
-  ssh-keygen -t rsa -b 4096 -f "$SSH_KEY_PATH" -N "" -C "book-excerpt-server-$(date +%Y%m%d)"
-  
-  # 复制公钥到服务器
-  print_info "复制公钥到服务器..."
-  ssh-copy-id -i "${SSH_KEY_PATH}.pub" $SSH_OPTIONS -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST}
-  
-  print_success "SSH 密钥设置完成！"
-  echo -e "${YELLOW}现在可以使用密钥认证连接服务器，无需输入密码${NC}"
+  echo ""
+  print_success "SSH 登录认证信息已更新！"
+  print_info "现在可以使用 SSH 密钥无密码登录服务器"
 }
 
 # ============================================
@@ -799,313 +752,84 @@ cmd_setup_ssh() {
 # ============================================
 cmd_update_nginx() {
   # 确定配置文件路径
-  if [ -n "$1" ]; then
-    LOCAL_CONF="$1"
-  else
-    LOCAL_CONF="$SCRIPT_DIR/nginx.conf"
-  fi
-
-  # 检查本地配置文件是否存在
-  if [ ! -f "$LOCAL_CONF" ]; then
-    print_error "配置文件不存在: ${LOCAL_CONF}"
-    exit 1
-  fi
+  local nginx_local_conf="${1:-$SCRIPT_DIR/nginx.conf}"
+  check_file_exists "$nginx_local_conf" "配置文件不存在" || return 1
 
   # 确定证书文件路径（使用 api.book-excerpt.zhifu.tech_nginx 目录）
-  CERT_DIR="$SCRIPT_DIR/api.book-excerpt.zhifu.tech_nginx"
+  local cert_dir="$SCRIPT_DIR/api.book-excerpt.zhifu.tech_nginx"
   # 优先使用 api 子域名的证书，如果没有则回退到主域名证书
-  CERT_BUNDLE_CRT="$CERT_DIR/api.book-excerpt.zhifu.tech_bundle.crt"
-  CERT_BUNDLE_PEM="$CERT_DIR/api.book-excerpt.zhifu.tech_bundle.pem"
-  CERT_CRT="$CERT_DIR/api.book-excerpt.zhifu.tech.crt"
-  CERT_PEM="$CERT_DIR/api.book-excerpt.zhifu.tech.pem"
-  CERT_KEY="$CERT_DIR/api.book-excerpt.zhifu.tech.key"
+  local cert_bundle_crt="$cert_dir/api.book-excerpt.zhifu.tech_bundle.crt"
+  local cert_bundle_pem="$cert_dir/api.book-excerpt.zhifu.tech_bundle.pem"
+  local cert_crt="$cert_dir/api.book-excerpt.zhifu.tech.crt"
+  local cert_pem="$cert_dir/api.book-excerpt.zhifu.tech.pem"
+  local cert_key="$cert_dir/api.book-excerpt.zhifu.tech.key"
   
   # 如果 API 子域名证书不存在，回退到主域名证书
-  if [ ! -f "$CERT_KEY" ]; then
-    FALLBACK_CERT_DIR="$SCRIPT_DIR/book-excerpt.zhifu.tech_nginx"
-    if [ -f "$FALLBACK_CERT_DIR/book-excerpt.zhifu.tech.key" ]; then
-      CERT_DIR="$FALLBACK_CERT_DIR"
-      CERT_BUNDLE_CRT="$CERT_DIR/book-excerpt.zhifu.tech_bundle.crt"
-      CERT_BUNDLE_PEM="$CERT_DIR/book-excerpt.zhifu.tech_bundle.pem"
-      CERT_CRT="$CERT_DIR/book-excerpt.zhifu.tech.crt"
-      CERT_PEM="$CERT_DIR/book-excerpt.zhifu.tech.pem"
-      CERT_KEY="$CERT_DIR/book-excerpt.zhifu.tech.key"
-      print_info "使用主域名证书目录: ${CERT_DIR}"
+  if [ ! -f "$cert_key" ]; then
+    local fallback_cert_dir="$SCRIPT_DIR/book-excerpt.zhifu.tech_nginx"
+    if [ -f "$fallback_cert_dir/book-excerpt.zhifu.tech.key" ]; then
+      cert_dir="$fallback_cert_dir"
+      cert_bundle_crt="$cert_dir/book-excerpt.zhifu.tech_bundle.crt"
+      cert_bundle_pem="$cert_dir/book-excerpt.zhifu.tech_bundle.pem"
+      cert_crt="$cert_dir/book-excerpt.zhifu.tech.crt"
+      cert_pem="$cert_dir/book-excerpt.zhifu.tech.pem"
+      cert_key="$cert_dir/book-excerpt.zhifu.tech.key"
+      print_info "使用主域名证书目录: ${cert_dir}"
     fi
   fi
 
   # 检查证书文件是否存在（支持多种命名格式）
-  CERT_FILES_EXIST=false
-  if [ -f "$CERT_BUNDLE_CRT" ] && [ -f "$CERT_KEY" ]; then
-    CERT_FILES_EXIST=true
-    CERT_FILE="$CERT_BUNDLE_CRT"
-  elif [ -f "$CERT_BUNDLE_PEM" ] && [ -f "$CERT_KEY" ]; then
-    CERT_FILES_EXIST=true
-    CERT_FILE="$CERT_BUNDLE_PEM"
-  elif [ -f "$CERT_CRT" ] && [ -f "$CERT_KEY" ]; then
-    CERT_FILES_EXIST=true
-    CERT_FILE="$CERT_CRT"
-  elif [ -f "$CERT_PEM" ] && [ -f "$CERT_KEY" ]; then
-    CERT_FILES_EXIST=true
-    CERT_FILE="$CERT_PEM"
+  local ssl_cert_files_exist=false
+  local ssl_cert_name=""
+  if [ -f "$cert_key" ]; then
+    if [[ "$cert_dir" == *"api.book-excerpt.zhifu.tech_nginx"* ]]; then
+      ssl_cert_name="api.book-excerpt.zhifu.tech"
+    else
+      ssl_cert_name="book-excerpt.zhifu.tech"
+    fi
+    
+    if ([ -f "$cert_bundle_crt" ] || [ -f "$cert_bundle_pem" ] || [ -f "$cert_crt" ] || [ -f "$cert_pem" ]); then
+      ssl_cert_files_exist=true
+    fi
   fi
 
-  if [ "$CERT_FILES_EXIST" = true ]; then
+  if [ "$ssl_cert_files_exist" = true ]; then
     print_success "找到证书文件"
-    print_info "  证书文件: ${CERT_FILE}"
-    print_info "  私钥文件: ${CERT_KEY}"
+    print_info "  证书目录: ${cert_dir}"
+    print_info "  证书名称: ${ssl_cert_name}"
   else
     print_warning "未找到证书文件，将跳过证书上传"
-    print_info "  证书目录: ${CERT_DIR}"
-    print_info "  预期文件:"
-    print_info "    - ${CERT_BUNDLE_CRT}"
-    print_info "    - ${CERT_BUNDLE_PEM}"
-    print_info "    - ${CERT_CRT}"
-    print_info "    - ${CERT_PEM}"
-    print_info "    - ${CERT_KEY}"
+    print_info "  证书目录: ${cert_dir}"
   fi
 
-  NGINX_CONF_PATH="/etc/nginx/conf.d/book-excerpt-generator-server.conf"
-  BACKUP_DIR="/etc/nginx/conf.d/backup"
+  print_info "更新 Nginx 配置到服务器 ${SERVER_HOST}..."
 
-  print_title "更新 Nginx 配置到服务器 ${SERVER_HOST}"
-  print_info "本地配置文件: ${LOCAL_CONF}"
-  print_info "服务器配置文件: ${NGINX_CONF_PATH}"
-
-  # 在服务器上执行更新操作
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
-set -e
-
-# 查找 nginx 命令路径
-NGINX_CMD=""
-if command -v nginx &> /dev/null; then
-  NGINX_CMD="nginx"
-elif [ -f "/usr/sbin/nginx" ]; then
-  NGINX_CMD="/usr/sbin/nginx"
-elif [ -f "/usr/local/sbin/nginx" ]; then
-  NGINX_CMD="/usr/local/sbin/nginx"
-elif [ -f "/sbin/nginx" ]; then
-  NGINX_CMD="/sbin/nginx"
-fi
-
-# 检查 Nginx 是否安装
-if [ -z "$NGINX_CMD" ]; then
-  echo -e "\033[0;33m⚠ Nginx 未安装或未找到，将继续上传配置文件\033[0m"
-  echo "可以稍后安装 Nginx 并测试配置"
-else
-  NGINX_VERSION=$($NGINX_CMD -v 2>&1)
-  echo -e "\033[0;32m✓ Nginx 已安装: $NGINX_VERSION\033[0m"
-fi
-
-# 创建备份目录
-mkdir -p /etc/nginx/conf.d/backup
-echo -e "\033[0;32m✓ 备份目录已创建\033[0m"
-
-# 备份现有配置（如果存在）
-if [ -f "/etc/nginx/conf.d/book-excerpt-generator-server.conf" ]; then
-  BACKUP_FILE="/etc/nginx/conf.d/backup/book-excerpt-generator-server.conf.backup.$(date +%Y%m%d_%H%M%S)"
-  cp /etc/nginx/conf.d/book-excerpt-generator-server.conf "$BACKUP_FILE"
-  echo -e "\033[0;32m✓ 已备份现有配置到: $BACKUP_FILE\033[0m"
-else
-  echo -e "\033[0;33m⚠ 配置文件不存在，将创建新配置\033[0m"
-fi
-
-# 创建配置目录（如果不存在）
-mkdir -p /etc/nginx/conf.d
-echo -e "\033[0;32m✓ 配置目录已准备\033[0m"
-ENDSSH
-
-  # 上传配置文件
-  print_info "上传配置文件到服务器..."
-  scp $SSH_OPTIONS -P ${SERVER_PORT} "$LOCAL_CONF" ${SSH_TARGET}:${NGINX_CONF_PATH}
-
-  # 上传证书文件（如果存在）
-  if [ "$CERT_FILES_EXIST" = true ]; then
-    print_info "上传 SSL 证书到服务器..."
-    
-    # 在服务器上创建 SSL 证书目录
-    ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << ENDSSH
-set -e
-mkdir -p /etc/nginx/ssl
-echo -e "\033[0;32m✓ SSL 证书目录已创建: /etc/nginx/ssl\033[0m"
-ENDSSH
-    
-    # 确定证书名称（根据实际使用的证书目录）
-    if [[ "$CERT_DIR" == *"api.book-excerpt.zhifu.tech_nginx"* ]]; then
-      CERT_NAME="api.book-excerpt.zhifu.tech"
-    else
-      CERT_NAME="book-excerpt.zhifu.tech"
-    fi
-    
-    # 上传证书文件（根据实际找到的文件类型上传）
-    if [ -f "$CERT_BUNDLE_CRT" ]; then
-      scp $SSH_OPTIONS -P ${SERVER_PORT} "$CERT_BUNDLE_CRT" ${SSH_TARGET}:/etc/nginx/ssl/${CERT_NAME}_bundle.crt
-      print_success "证书文件已上传 (bundle.crt)"
-    elif [ -f "$CERT_BUNDLE_PEM" ]; then
-      scp $SSH_OPTIONS -P ${SERVER_PORT} "$CERT_BUNDLE_PEM" ${SSH_TARGET}:/etc/nginx/ssl/${CERT_NAME}_bundle.pem
-      print_success "证书文件已上传 (bundle.pem)"
-    elif [ -f "$CERT_CRT" ]; then
-      scp $SSH_OPTIONS -P ${SERVER_PORT} "$CERT_CRT" ${SSH_TARGET}:/etc/nginx/ssl/${CERT_NAME}.crt
-      print_success "证书文件已上传 (.crt)"
-    elif [ -f "$CERT_PEM" ]; then
-      scp $SSH_OPTIONS -P ${SERVER_PORT} "$CERT_PEM" ${SSH_TARGET}:/etc/nginx/ssl/${CERT_NAME}.pem
-      print_success "证书文件已上传 (.pem)"
-    fi
-    
-    # 上传私钥文件
-    scp $SSH_OPTIONS -P ${SERVER_PORT} "$CERT_KEY" ${SSH_TARGET}:/etc/nginx/ssl/${CERT_NAME}.key
-    print_success "私钥文件已上传"
-    
-    # 设置证书文件权限
-    ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << ENDSSH
-set -e
-# 设置证书文件权限（644）- 支持多种格式
-chmod 644 /etc/nginx/ssl/${CERT_NAME}_bundle.* 2>/dev/null || true
-chmod 644 /etc/nginx/ssl/${CERT_NAME}.crt 2>/dev/null || true
-chmod 644 /etc/nginx/ssl/${CERT_NAME}.pem 2>/dev/null || true
-# 设置私钥文件权限（600，只有所有者可读）
-chmod 600 /etc/nginx/ssl/${CERT_NAME}.key
-# 设置所有者
-chown root:root /etc/nginx/ssl/${CERT_NAME}.* 2>/dev/null || true
-echo -e "\033[0;32m✓ 证书文件权限已设置\033[0m"
-ENDSSH
-  fi
-
-  # 在服务器上验证和应用配置
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
-set -e
-
-# 检查主配置文件是否包含 conf.d
-echo "检查主配置文件..."
-if ! grep -q "include.*conf.d" /etc/nginx/nginx.conf 2>/dev/null; then
-  echo -e "\033[0;33m⚠ 主配置文件未包含 conf.d 目录\033[0m"
-  echo "检查是否需要添加 include 指令..."
-  
-  # 检查是否有 http 块
-  if grep -q "http {" /etc/nginx/nginx.conf; then
-    echo "主配置文件包含 http 块，但可能缺少 include 指令"
-    echo "建议手动添加: include /etc/nginx/conf.d/*.conf;"
-    echo "位置: 在 http {} 块内"
-  fi
-else
-  echo -e "\033[0;32m✓ 主配置文件已包含 conf.d 目录\033[0m"
-fi
-
-# 确保 conf.d 目录存在
-if [ ! -d "/etc/nginx/conf.d" ]; then
-  echo "创建 conf.d 目录..."
-  mkdir -p /etc/nginx/conf.d
-  echo -e "\033[0;32m✓ conf.d 目录已创建\033[0m"
-fi
-
-# 设置文件权限
-chmod 644 /etc/nginx/conf.d/book-excerpt-generator-server.conf
-chown root:root /etc/nginx/conf.d/book-excerpt-generator-server.conf
-echo -e "\033[0;32m✓ 文件权限已设置\033[0m"
-ENDSSH
-
-  # 测试 Nginx 配置
-  echo ""
-  print_title "测试 Nginx 配置"
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
-set -e
-
-# 查找 nginx 命令路径
-NGINX_CMD=""
-if command -v nginx &> /dev/null; then
-  NGINX_CMD="nginx"
-elif [ -f "/usr/sbin/nginx" ]; then
-  NGINX_CMD="/usr/sbin/nginx"
-elif [ -f "/usr/local/sbin/nginx" ]; then
-  NGINX_CMD="/usr/local/sbin/nginx"
-elif [ -f "/sbin/nginx" ]; then
-  NGINX_CMD="/sbin/nginx"
-fi
-
-if [ ! -z "$NGINX_CMD" ]; then
-  if $NGINX_CMD -t 2>&1; then
-    echo -e "\033[0;32m✓ Nginx 配置语法正确\033[0m"
+  # 使用共用脚本库更新配置
+  if [ "$ssl_cert_files_exist" = true ]; then
+    update_nginx_config \
+      "$nginx_local_conf" \
+      "$NGINX_CONF_PATH" \
+      "$SSH_OPTIONS" \
+      "$SERVER_PORT" \
+      "$SSH_TARGET" \
+      "ssh_exec" \
+      "$ssl_cert_name" \
+      "$cert_dir" \
+      "$SSL_CERT_DIR"
   else
-    echo -e "\033[0;31m✗ Nginx 配置语法错误\033[0m"
-    echo ""
-    echo "如果配置有误，可以从备份恢复："
-    echo "  ls -lt /etc/nginx/conf.d/backup/book-excerpt-generator-server.conf.backup.* | head -1"
-    exit 1
+    # 不使用 SSL 证书的简化版本
+    prepare_nginx_server "$NGINX_CONF_PATH" "ssh_exec" "$SSH_TARGET"
+    print_info "上传配置文件..."
+    scp $SSH_OPTIONS -P "${SERVER_PORT}" "$nginx_local_conf" "${SSH_TARGET}:${NGINX_CONF_PATH}"
+    test_and_reload_nginx "$NGINX_CONF_PATH" "ssh_exec" "$SSH_TARGET"
   fi
-else
-  echo -e "\033[0;33m⚠ 未找到 nginx 命令，跳过配置测试\033[0m"
-  echo "配置文件已上传，但无法验证语法"
-  echo "可以手动测试: /usr/sbin/nginx -t 或 systemctl status nginx"
-fi
-ENDSSH
-
-  # 重新加载 Nginx
-  echo ""
-  print_title "重新加载 Nginx 配置"
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
-set -e
-
-# 尝试重新加载（不中断服务）
-if systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null; then
-  echo -e "\033[0;32m✓ Nginx 配置已重新加载\033[0m"
-elif systemctl restart nginx 2>/dev/null || service nginx restart 2>/dev/null; then
-  echo -e "\033[0;33m⚠ 使用 restart 方式重新加载（服务会短暂中断）\033[0m"
-  echo -e "\033[0;32m✓ Nginx 已重启\033[0m"
-else
-  echo -e "\033[0;33m⚠ 无法重新加载 Nginx（可能未运行）\033[0m"
-  echo "配置文件已上传，可以手动启动:"
-  echo "  systemctl start nginx"
-fi
-
-# 检查 Nginx 状态
-echo ""
-echo "检查 Nginx 状态..."
-if systemctl is-active --quiet nginx 2>/dev/null || service nginx status &>/dev/null; then
-  echo -e "\033[0;32m✓ Nginx 正在运行\033[0m"
-  systemctl status nginx --no-pager -l 2>/dev/null | head -10 || service nginx status 2>/dev/null | head -10
-else
-  echo -e "\033[0;33m⚠ Nginx 未运行\033[0m"
-  echo "配置文件已上传，可以手动启动:"
-  echo "  systemctl start nginx"
-fi
-
-# 检查端口监听
-echo ""
-echo "检查端口监听..."
-if netstat -tlnp 2>/dev/null | grep -E 'nginx.*:(80|443)' > /dev/null || \
-   ss -tlnp 2>/dev/null | grep -E 'nginx.*:(80|443)' > /dev/null; then
-  echo -e "\033[0;32m✓ Nginx 端口正在监听\033[0m"
-  netstat -tlnp 2>/dev/null | grep -E 'nginx.*:(80|443)' || \
-  ss -tlnp 2>/dev/null | grep -E 'nginx.*:(80|443)'
-else
-  echo -e "\033[0;33m⚠ 未检测到 Nginx 端口监听\033[0m"
-fi
-
-echo ""
-echo "=========================================="
-echo "配置更新完成"
-echo "=========================================="
-ENDSSH
 
   echo ""
   print_success "Nginx 配置更新完成！"
-  echo -e "${BLUE}========================================${NC}"
-  echo -e "${YELLOW}配置文件位置:${NC}"
-  echo -e "  ${GREEN}${NGINX_CONF_PATH}${NC}"
-  if [ "$CERT_FILES_EXIST" = true ]; then
-    echo ""
-    echo -e "${YELLOW}SSL 证书位置:${NC}"
-    # 根据实际使用的证书目录确定证书名称
-    if [[ "$CERT_DIR" == *"api.book-excerpt.zhifu.tech_nginx"* ]]; then
-      echo -e "  ${GREEN}/etc/nginx/ssl/api.book-excerpt.zhifu.tech_bundle.*${NC}"
-      echo -e "  ${GREEN}/etc/nginx/ssl/api.book-excerpt.zhifu.tech.key${NC}"
-    else
-      echo -e "  ${GREEN}/etc/nginx/ssl/book-excerpt.zhifu.tech_bundle.*${NC}"
-      echo -e "  ${GREEN}/etc/nginx/ssl/book-excerpt.zhifu.tech.key${NC}"
-    fi
-  fi
+  print_info "配置文件: ${NGINX_CONF_PATH}"
+  [ "$ssl_cert_files_exist" = true ] && print_info "SSL 证书: ${SSL_CERT_DIR}/${ssl_cert_name}.*"
   echo ""
-  echo -e "${YELLOW}API 端点:${NC}"
+  print_info "API 端点:"
   echo -e "  ${GREEN}https://api.book-excerpt.zhifu.tech/api/config${NC}"
   echo -e "  ${GREEN}https://api.book-excerpt.zhifu.tech/health${NC}"
 }
@@ -1116,7 +840,7 @@ ENDSSH
 cmd_firewall() {
   print_title "检查防火墙配置"
   
-  ssh $SSH_OPTIONS -t -p ${SERVER_PORT} ${SSH_TARGET} << 'ENDSSH'
+  ssh_exec << 'ENDSSH'
 set -e
 
 echo "检查防火墙状态..."
@@ -1206,8 +930,8 @@ main() {
     install-pm2)
       cmd_install_pm2
       ;;
-    setup-ssh)
-      cmd_setup_ssh
+    update-ssh-key)
+      cmd_update_ssh_key
       ;;
     firewall)
       cmd_firewall
@@ -1223,6 +947,9 @@ main() {
       ;;
   esac
 }
+
+# 初始化 SSH 连接（在加载共用脚本后）
+init_ssh_connection
 
 # 执行主函数
 main "$@"
