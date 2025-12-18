@@ -29,6 +29,11 @@ APP_PORT="3001"
 NGINX_CONF_PATH="/etc/nginx/conf.d/book-excerpt-generator-server.conf"
 SSL_CERT_DIR="/etc/nginx/ssl"
 
+# Docker 配置
+readonly DOCKER_IMAGE_NAME="book-excerpt-generator-server"
+readonly DOCKER_COMPOSE_FILE="$PROJECT_ROOT/docker-compose.yml"
+readonly BUILD_PLATFORM="linux/amd64"
+
 # ============================================
 # 工具函数
 # ============================================
@@ -86,7 +91,16 @@ show_help() {
   echo -e "${YELLOW}用法:${NC}"
   echo "  ./book-excerpt-server.sh [command] [options]"
   echo ""
-  echo -e "${YELLOW}可用命令:${NC}"
+  echo -e "${YELLOW}本地命令:${NC}"
+  echo -e "  ${GREEN}dev${NC}                启动本地开发服务器"
+  echo -e "  ${GREEN}start${NC}              启动本地生产服务器"
+  echo ""
+  echo -e "  ${GREEN}Docker 命令:${NC}"
+  echo -e "  ${GREEN}docker-build${NC}       构建本地 Docker 镜像"
+  echo -e "  ${GREEN}docker-up${NC}          启动本地 Docker 容器"
+  echo -e "  ${GREEN}docker-down${NC}        停止本地 Docker 容器"
+  echo -e "  ${GREEN}docker-logs${NC}        查看本地 Docker 日志"
+  echo -e "  ${GREEN}docker-deploy${NC}      Docker 部署到服务器"
   echo ""
   echo -e "  ${GREEN}SSH 配置:${NC}"
   echo -e "  ${GREEN}update-ssh-key${NC}     更新 SSH 公钥到服务器"
@@ -100,8 +114,12 @@ show_help() {
   echo -e "  ${GREEN}check${NC}              快速检查服务"
   echo -e "  ${GREEN}logs${NC}               查看服务日志"
   echo ""
+  echo -e "  ${GREEN}数据管理:${NC}"
+  echo -e "  ${GREEN}sync-data${NC}          同步数据 (up/down)"
+  echo ""
   echo -e "  ${GREEN}Nginx 配置:${NC}"
   echo -e "  ${GREEN}update-nginx${NC}        更新 Nginx 配置文件"
+  echo -e "  ${GREEN}start-nginx${NC}         检查并启动 Nginx 服务"
   echo ""
   echo -e "  ${GREEN}工具:${NC}"
   echo -e "  ${GREEN}fix-502${NC}            修复 502 错误"
@@ -112,10 +130,103 @@ show_help() {
   echo ""
   echo -e "${YELLOW}示例:${NC}"
   echo "  ./book-excerpt-server.sh deploy"
-  echo "  ./book-excerpt-server.sh status"
-  echo "  ./book-excerpt-server.sh logs"
-  echo "  ./book-excerpt-server.sh update-nginx"
+  echo "  ./book-excerpt-server.sh sync-data up"
+  echo "  ./book-excerpt-server.sh docker-deploy"
   echo ""
+}
+
+# ============================================
+# 本地开发
+# ============================================
+cmd_dev() {
+  print_info "启动开发服务器..."
+  cd "$PROJECT_ROOT" || return 1
+  npm run dev
+}
+
+# 启动服务
+cmd_start() {
+  print_info "启动服务..."
+  cd "$PROJECT_ROOT" || return 1
+  npm start
+}
+
+# ============================================
+# Docker 功能
+# ============================================
+cmd_docker_build() {
+  print_info "构建 Docker 镜像..."
+  cd "$PROJECT_ROOT" || return 1
+  
+  check_file_exists "Dockerfile" "未找到 Dockerfile" || return 1
+  
+  local build_platform="${BUILD_PLATFORM:-linux/amd64}"
+  
+  if ! docker build --platform "$build_platform" -t "${DOCKER_IMAGE_NAME}:latest" .; then
+    print_error "Docker 镜像构建失败"
+    return 1
+  fi
+  
+  print_success "Docker 镜像构建完成（平台: ${build_platform}）"
+}
+
+cmd_docker_up() {
+  print_info "启动 Docker 容器..."
+  cd "$PROJECT_ROOT" || return 1
+  docker-compose -f "$DOCKER_COMPOSE_FILE" up -d
+  print_success "Docker 容器已启动"
+  echo ""
+  print_info "访问地址: http://localhost:${APP_PORT:-3001}"
+}
+
+cmd_docker_down() {
+  print_info "停止 Docker 容器..."
+  cd "$PROJECT_ROOT" || return 1
+  docker-compose -f "$DOCKER_COMPOSE_FILE" down
+  print_success "Docker 容器已停止"
+}
+
+cmd_docker_logs() {
+  print_info "查看 Docker 容器日志..."
+  cd "$PROJECT_ROOT" || return 1
+  docker-compose -f "$DOCKER_COMPOSE_FILE" logs -f --tail=100
+}
+
+cmd_docker_deploy() {
+  print_info "Docker 部署到服务器..."
+  cd "$PROJECT_ROOT" || return 1
+
+  # 构建镜像
+  if ! cmd_docker_build; then
+    return 1
+  fi
+
+  # 保存镜像
+  print_info "保存 Docker 镜像..."
+  local temp_image_file="/tmp/${DOCKER_IMAGE_NAME}.tar.gz"
+  register_cleanup "$temp_image_file"
+  
+  if ! docker save "${DOCKER_IMAGE_NAME}:latest" | gzip > "$temp_image_file"; then
+    print_error "保存镜像失败"
+    return 1
+  fi
+
+  # 上传镜像和 docker-compose.yml
+  print_info "上传镜像到服务器..."
+  ssh $SSH_OPTIONS -p "${SERVER_PORT}" "$SSH_TARGET" "mkdir -p $APP_DIR"
+  scp $SSH_OPTIONS -P "${SERVER_PORT}" "$temp_image_file" "$SSH_TARGET:$APP_DIR/"
+  scp $SSH_OPTIONS -P "${SERVER_PORT}" "$DOCKER_COMPOSE_FILE" "$SSH_TARGET:$APP_DIR/"
+
+  # 在服务器上加载镜像并启动
+  print_info "在服务器上部署镜像..."
+  ssh $SSH_OPTIONS -p "${SERVER_PORT}" "$SSH_TARGET" << 'ENDSSH'
+    cd $APP_DIR
+    docker load < $(basename "$temp_image_file")
+    docker-compose -f $(basename "$DOCKER_COMPOSE_FILE") up -d
+    rm -f $(basename "$temp_image_file")
+ENDSSH
+
+  print_success "Docker 部署完成"
 }
 
 # ============================================
@@ -834,6 +945,105 @@ cmd_update_nginx() {
   echo -e "  ${GREEN}https://api.book-excerpt.zhifu.tech/health${NC}"
 }
 
+# 启动 Nginx
+cmd_start_nginx() {
+  print_info "检查并启动 Nginx..."
+  start_nginx_service "ssh_exec" "$SSH_TARGET"
+  echo ""
+  print_success "Nginx 服务已就绪"
+}
+
+# ============================================
+# 数据同步功能（双向同步）
+# ============================================
+
+# 检测 Git 变更的文件
+detect_git_changes() {
+  local data_dir="${1:-data}"
+  GIT_ADDED_FILES=""
+  GIT_MODIFIED_FILES=""
+  GIT_DELETED_FILES=""
+  
+  if ! git -C "$PROJECT_ROOT" rev-parse --git-dir > /dev/null 2>&1; then
+    return 1
+  fi
+  
+  # 获取相对于项目根目录的路径
+  local rel_data_dir=$(cd "$PROJECT_ROOT" && realpath --relative-to="$PROJECT_ROOT" "$data_dir" 2>/dev/null || echo "data")
+  cd "$PROJECT_ROOT" || return 1
+  
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local status="${line:0:2}"
+    local file="${line:3}"
+    [[ "$file" != ${rel_data_dir}/* ]] && continue
+    local full_path="$PROJECT_ROOT/$file"
+    
+    case "$status" in
+      "??"|"A ") GIT_ADDED_FILES="${GIT_ADDED_FILES}${full_path}"$'\n' ;;
+      " M"|"M ") GIT_MODIFIED_FILES="${GIT_MODIFIED_FILES}${full_path}"$'\n' ;;
+      " D"|"D ") GIT_DELETED_FILES="${GIT_DELETED_FILES}${file}"$'\n' ;;
+    esac
+  done < <(git -C "$PROJECT_ROOT" status --porcelain "$rel_data_dir" 2>/dev/null)
+  
+  GIT_ADDED_FILES=$(echo "$GIT_ADDED_FILES" | grep -v '^$')
+  GIT_MODIFIED_FILES=$(echo "$GIT_MODIFIED_FILES" | grep -v '^$')
+  GIT_DELETED_FILES=$(echo "$GIT_DELETED_FILES" | grep -v '^$')
+  
+  return 0
+}
+
+cmd_sync_data() {
+  local direction="${1:-help}"
+  local force_flag=false
+  shift $(( $# > 0 ? 1 : 0 ))
+  
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force|-f) force_flag=true; shift ;;
+      *) print_error "未知参数: $1"; exit 1 ;;
+    esac
+  done
+  
+  case "$direction" in
+    up|to-server) cmd_sync_data_to_server "$force_flag" ;;
+    down|from-server) cmd_sync_data_from_server ;;
+    *) echo "用法: ./book-excerpt-server.sh sync-data [up|down] [--force]" ;;
+  esac
+}
+
+cmd_sync_data_to_server() {
+  local force="$1"
+  local DATA_DIR="$PROJECT_ROOT/data"
+  [ ! -d "$DATA_DIR" ] && { print_error "本地数据目录不存在: $DATA_DIR"; return 1; }
+  
+  print_info "同步数据到服务器..."
+  ssh $SSH_OPTIONS -p "${SERVER_PORT}" "$SSH_TARGET" "mkdir -p $APP_DIR/data"
+  
+  if [ "$force" = "true" ]; then
+    scp $SSH_OPTIONS -r -P "${SERVER_PORT}" "$DATA_DIR"/* "$SSH_TARGET:$APP_DIR/data/"
+  else
+    detect_git_changes "$DATA_DIR" || { print_warning "不在 Git 仓库，同步所有文件"; scp $SSH_OPTIONS -r -P "${SERVER_PORT}" "$DATA_DIR"/* "$SSH_TARGET:$APP_DIR/data/"; return 0; }
+    
+    for file in $GIT_ADDED_FILES $GIT_MODIFIED_FILES; do
+      [ -f "$file" ] && scp $SSH_OPTIONS -P "${SERVER_PORT}" "$file" "$SSH_TARGET:$APP_DIR/data/"
+    done
+    
+    echo "$GIT_DELETED_FILES" | while IFS= read -r git_file; do
+      [ -n "$git_file" ] && ssh $SSH_OPTIONS -p "${SERVER_PORT}" "$SSH_TARGET" "rm -f $APP_DIR/data/$(basename "$git_file")"
+    done
+  fi
+  print_success "数据同步到服务器完成"
+}
+
+cmd_sync_data_from_server() {
+  local DATA_DIR="$PROJECT_ROOT/data"
+  print_info "从服务器同步数据..."
+  mkdir -p "$DATA_DIR"
+  scp $SSH_OPTIONS -r -P "${SERVER_PORT}" "$SSH_TARGET:$APP_DIR/data/*" "$DATA_DIR/"
+  print_success "从服务器同步数据完成"
+}
+
 # ============================================
 # 检查防火墙
 # ============================================
@@ -900,12 +1110,33 @@ ENDSSH
 # ============================================
 main() {
   # 显示欢迎界面
-  show_welcome "$1"
+  show_welcome "${1:-}"
 
   # 解析命令
   COMMAND="${1:-help}"
 
   case "$COMMAND" in
+    dev)
+      cmd_dev
+      ;;
+    start)
+      cmd_start
+      ;;
+    docker-build)
+      cmd_docker_build
+      ;;
+    docker-up)
+      cmd_docker_up
+      ;;
+    docker-down)
+      cmd_docker_down
+      ;;
+    docker-logs)
+      cmd_docker_logs
+      ;;
+    docker-deploy)
+      cmd_docker_deploy
+      ;;
     deploy)
       cmd_deploy
       ;;
@@ -922,16 +1153,23 @@ main() {
       cmd_fix_502
       ;;
     logs)
-      cmd_logs "$2"
+      cmd_logs "${2:-}"
       ;;
     update-nginx)
-      cmd_update_nginx "$2"
+      cmd_update_nginx "${2:-}"
+      ;;
+    start-nginx)
+      cmd_start_nginx
       ;;
     install-pm2)
       cmd_install_pm2
       ;;
     update-ssh-key)
       cmd_update_ssh_key
+      ;;
+    sync-data)
+      shift
+      cmd_sync_data "$@"
       ;;
     firewall)
       cmd_firewall
